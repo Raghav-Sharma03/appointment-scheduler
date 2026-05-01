@@ -41,6 +41,18 @@ export class AppointmentsController {
     return this.appointmentsService.getAppointmentsByDoctor(doctorId);
   }
 
+  @Get('available-slots/:doctorId')
+  getAvailableSlotsForDate(
+    @Param('doctorId') doctorId: string,
+    @Query('date') date: string,
+  ) {
+    const targetDate = date || new Date().toISOString().split('T')[0];
+    return this.appointmentsService.getAvailableSlotsForDate(
+      doctorId,
+      targetDate,
+    );
+  }
+
   @Patch(':id/cancel')
   cancelAppointment(@Param('id') id: string) {
     return this.appointmentsService.cancelAppointment(id);

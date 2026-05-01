@@ -109,4 +109,72 @@ export class DoctorsService {
       workingHours: `${workingDay.startTime} - ${workingDay.endTime}`,
     };
   }
+  async getAvailableSlotsForDate(
+      doctorId: string,
+      date: string,
+    ): Promise<any> {
+      const doctor = await this.getDoctorById(doctorId);
+
+      const checkDate = new Date(date + 'T00:00:00');
+      const dayOfWeek = checkDate.getDay();
+
+      const dayNames = [
+        'Sunday', 'Monday', 'Tuesday', 'Wednesday',
+        'Thursday', 'Friday', 'Saturday',
+      ];
+
+  // Check if doctor works on this day
+      const availability = doctor.availability.find(
+        (a) => a.dayOfWeek === dayOfWeek,
+      );
+
+      if (!availability || !availability.isWorkingDay) {
+        return {
+          doctorName: doctor.name,
+          date,
+          dayName: dayNames[dayOfWeek],
+          isDoctorAvailable: false,
+          message: `Dr. ${doctor.name} is not available on ${dayNames[dayOfWeek]}`,
+          availableSlots: [],
+        };
+      }
+
+  // Calculate total slots
+      const [sh, sm] = availability.startTime.split(':').map(Number);
+      const [eh, em] = availability.endTime.split(':').map(Number);
+      const totalMins = eh * 60 + em - (sh * 60 + sm);
+      const totalSlots = doctor.maxSlotsOverride
+      ? doctor.maxSlotsOverride
+      : Math.floor(totalMins / doctor.slotDurationMins);
+
+    const regularSlots = totalSlots - doctor.emergencySlotsPerSession;
+
+  // Generate all slot times
+    const allSlots: { tokenNumber: number; slotTime: string; status: string }[] = [];
+    for (let i = 0; i < regularSlots; i++) {
+      const slotMins = sh * 60 + sm + i * doctor.slotDurationMins;
+      const slotHour = Math.floor(slotMins / 60);
+      const slotMin = slotMins % 60;
+      const slotTime = `${String(slotHour).padStart(2, '0')}:${String(slotMin).padStart(2, '0')}`;
+      allSlots.push({
+        tokenNumber: i + 1,
+        slotTime,
+        status: 'available',
+      });
+    }
+
+    return {
+      doctorName: doctor.name,
+      specialization: doctor.specialization,
+      schedulingType: doctor.schedulingType,
+      date,
+      dayName: dayNames[dayOfWeek],
+      isDoctorAvailable: true,
+      workingHours: `${availability.startTime} - ${availability.endTime}`,
+      slotDurationMins: doctor.slotDurationMins,
+      totalRegularSlots: regularSlots,
+      emergencySlots: doctor.emergencySlotsPerSession,
+      availableSlots: allSlots,
+    };
+  }
 }

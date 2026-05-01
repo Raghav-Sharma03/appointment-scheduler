@@ -628,4 +628,96 @@ export class AppointmentsService {
     }
     return `No slots available today. Next appointment on ${dayName}. Token #${result.tokenNumber}, Reporting time: ${result.slotTime}`;
   }
+  async getAvailableSlotsForDate(doctorId: string, date: string) {
+  const doctor = await this.doctorsService.getDoctorById(doctorId);
+
+  const checkDate = new Date(date + 'T00:00:00');
+  const dayOfWeek = checkDate.getDay();
+  const dayNames = [
+    'Sunday','Monday','Tuesday','Wednesday',
+    'Thursday','Friday','Saturday',
+  ];
+
+  const availability = doctor.availability.find(
+    (a: any) => a.dayOfWeek === dayOfWeek,
+  );
+
+  if (!availability || !availability.isWorkingDay) {
+    return {
+      doctorName: doctor.name,
+      date,
+      dayName: dayNames[dayOfWeek],
+      isDoctorAvailable: false,
+      message: `Dr. ${doctor.name} is not available on ${dayNames[dayOfWeek]}`,
+      slots: [],
+    };
+  }
+
+  // Calculate total slots
+  const [sh, sm] = availability.startTime.split(':').map(Number);
+  const [eh, em] = availability.endTime.split(':').map(Number);
+  const totalMins = eh * 60 + em - (sh * 60 + sm);
+  const totalSlots = doctor.maxSlotsOverride
+    ? doctor.maxSlotsOverride
+    : Math.floor(totalMins / doctor.slotDurationMins);
+  const regularSlots = totalSlots - doctor.emergencySlotsPerSession;
+
+  // Get all booked appointments for this date
+  const bookedAppointments = await this.appointmentsRepository.find({
+    where: {
+      doctor: { id: doctorId },
+      appointmentDate: date,
+      status: AppointmentStatus.BOOKED,
+    },
+  });
+
+  // Build slot list with real status
+  const slots: {
+    tokenNumber: number;
+    slotTime: string;
+    status: string;
+    patientName?: string;
+  }[] = [];
+
+  for (let i = 0; i < regularSlots; i++) {
+    const slotMins = sh * 60 + sm + i * doctor.slotDurationMins;
+    const slotHour = Math.floor(slotMins / 60);
+    const slotMin = slotMins % 60;
+    const slotTime = `${String(slotHour).padStart(2, '0')}:${String(slotMin).padStart(2, '0')}`;
+
+    // Check if this token is booked
+    const bookedAppointment = bookedAppointments.find(
+      (apt) => apt.tokenNumber === i + 1,
+    );
+
+    slots.push({
+      tokenNumber: i + 1,
+      slotTime,
+      status: bookedAppointment ? 'booked' : 'available',
+      ...(bookedAppointment && {
+        patientName: bookedAppointment.patientName || 'Patient',
+      }),
+    });
+  }
+
+  const availableCount = slots.filter((s) => s.status === 'available').length;
+  const bookedCount = slots.filter((s) => s.status === 'booked').length;
+
+  return {
+    doctorName: doctor.name,
+    specialization: doctor.specialization,
+    schedulingType: doctor.schedulingType,
+    date,
+    dayName: dayNames[dayOfWeek],
+    isDoctorAvailable: true,
+    workingHours: `${availability.startTime} - ${availability.endTime}`,
+    slotDurationMins: doctor.slotDurationMins,
+    totalRegularSlots: regularSlots,
+    emergencySlots: doctor.emergencySlotsPerSession,
+    availableSlotsCount: availableCount,
+    bookedSlotsCount: bookedCount,
+    isFull: availableCount === 0,
+    slots,
+  };
+}
 }
