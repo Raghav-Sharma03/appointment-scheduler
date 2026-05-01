@@ -25,6 +25,8 @@ export class DoctorsService {
       specialization: createDoctorDto.specialization,
       slotDurationMins: createDoctorDto.slotDurationMins || 15,
       maxSlotsOverride: createDoctorDto.maxSlotsOverride,
+      schedulingType: createDoctorDto.schedulingType,
+      emergencySlotsPerSession: createDoctorDto.emergencySlotsPerSession || 0,
       isActive: createDoctorDto.isActive ?? true,
     });
     return this.doctorsRepository.save(doctor);
@@ -43,7 +45,12 @@ export class DoctorsService {
       relations: ['availability'],
     });
     if (!doctor) {
-      throw new NotFoundException(`Doctor with ID ${id} not found`);
+      throw new NotFoundException(`Doctor with ID "${id}" not found`);
+    }
+    if (!doctor.isActive) {
+      throw new BadRequestException(
+        `Doctor "${doctor.name}" is currently not active. Please choose another doctor.`,
+      );
     }
     return doctor;
   }
@@ -53,11 +60,7 @@ export class DoctorsService {
     availabilityDtos: SetAvailabilityDto[],
   ): Promise<Doctor> {
     const doctor = await this.getDoctorById(doctorId);
-
-    // Delete existing availability for this doctor
     await this.availabilityRepository.delete({ doctor: { id: doctorId } });
-
-    // Create new availability records
     const availabilities = availabilityDtos.map((dto) =>
       this.availabilityRepository.create({
         doctor: doctor,
@@ -67,44 +70,43 @@ export class DoctorsService {
         isWorkingDay: dto.isWorkingDay ?? true,
       }),
     );
-
     await this.availabilityRepository.save(availabilities);
-
     return this.getDoctorById(doctorId);
   }
 
-  async getDoctorSlots(doctorId: string): Promise<{
-    doctor: Doctor;
-    totalSlotsPerSession: number;
-    slotDurationMins: number;
-  }> {
+  async getDoctorSlots(doctorId: string) {
     const doctor = await this.getDoctorById(doctorId);
-
     if (!doctor.availability || doctor.availability.length === 0) {
       throw new BadRequestException(
         'Doctor has no availability configured yet',
       );
     }
-
-    // Get first working day availability to calculate slots
     const workingDay = doctor.availability.find((a) => a.isWorkingDay);
     if (!workingDay) {
       throw new BadRequestException('Doctor has no working days configured');
     }
-
     const [startHour, startMin] = workingDay.startTime.split(':').map(Number);
     const [endHour, endMin] = workingDay.endTime.split(':').map(Number);
-
-    const totalMinutes =
-      endHour * 60 + endMin - (startHour * 60 + startMin);
-    const totalSlots = doctor.maxSlotsOverride
-      ? doctor.maxSlotsOverride
-      : Math.floor(totalMinutes / doctor.slotDurationMins);
+    const totalMinutes = endHour * 60 + endMin - (startHour * 60 + startMin);
+    const autoCalculatedSlots = Math.floor(
+      totalMinutes / doctor.slotDurationMins,
+    );
+    const totalSlots = doctor.maxSlotsOverride || autoCalculatedSlots;
+    const regularSlots = totalSlots - doctor.emergencySlotsPerSession;
 
     return {
-      doctor,
-      totalSlotsPerSession: totalSlots,
+      doctor: {
+        id: doctor.id,
+        name: doctor.name,
+        specialization: doctor.specialization,
+        schedulingType: doctor.schedulingType,
+      },
       slotDurationMins: doctor.slotDurationMins,
+      autoCalculatedSlots,
+      totalSlotsPerSession: totalSlots,
+      regularSlots,
+      emergencySlots: doctor.emergencySlotsPerSession,
+      workingHours: `${workingDay.startTime} - ${workingDay.endTime}`,
     };
   }
 }
