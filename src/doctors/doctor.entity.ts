@@ -8,9 +8,9 @@ import {
 import { DoctorAvailability } from './doctor-availability.entity';
 
 export enum SchedulingType {
-  STREAM = 'stream',           // Fixed individual time slots
-  WAVE = 'wave',               // Group patients at top of hour
-  MODIFIED_WAVE = 'modified_wave', // 2 at hour, 1 at half hour
+  STREAM = 'stream',
+  WAVE = 'wave',
+  MODIFIED_WAVE = 'modified_wave',
 }
 
 @Entity('doctors')
@@ -24,9 +24,18 @@ export class Doctor {
   @Column({ nullable: true })
   specialization: string;
 
+  // Working hours — start and end time at doctor level
+  @Column({ name: 'start_time', type: 'time' })
+  startTime: string;
+
+  @Column({ name: 'end_time', type: 'time' })
+  endTime: string;
+
+  // How long each appointment takes
   @Column({ type: 'int', default: 15, name: 'slot_duration_mins' })
   slotDurationMins: number;
 
+  // Optional manual override for max patients per day
   @Column({ type: 'int', nullable: true, name: 'max_slots_override' })
   maxSlotsOverride: number;
 
@@ -37,9 +46,6 @@ export class Doctor {
     name: 'scheduling_type',
   })
   schedulingType: SchedulingType;
-
-  @Column({ type: 'int', default: 0, name: 'emergency_slots_per_session' })
-  emergencySlotsPerSession: number;
 
   @Column({ default: true, name: 'is_active' })
   isActive: boolean;

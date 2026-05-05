@@ -4,6 +4,7 @@ import {
   IsInt,
   IsBoolean,
   IsEnum,
+  Matches,
   Min,
   Max,
 } from 'class-validator';
@@ -16,6 +17,18 @@ export class CreateDoctorDto {
   @IsString()
   @IsOptional()
   specialization?: string;
+
+  @IsString()
+  @Matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/, {
+    message: 'startTime must be in HH:MM format. Example: 09:00',
+  })
+  startTime: string;
+
+  @IsString()
+  @Matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/, {
+    message: 'endTime must be in HH:MM format. Example: 17:00',
+  })
+  endTime: string;
 
   @IsInt()
   @IsOptional()
@@ -30,12 +43,6 @@ export class CreateDoctorDto {
   @IsEnum(SchedulingType)
   @IsOptional()
   schedulingType?: SchedulingType;
-
-  @IsInt()
-  @IsOptional()
-  @Min(0)
-  @Max(10)
-  emergencySlotsPerSession?: number;
 
   @IsBoolean()
   @IsOptional()

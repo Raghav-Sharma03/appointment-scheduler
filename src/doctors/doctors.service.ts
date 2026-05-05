@@ -23,10 +23,11 @@ export class DoctorsService {
     const doctor = this.doctorsRepository.create({
       name: createDoctorDto.name,
       specialization: createDoctorDto.specialization,
+      startTime: createDoctorDto.startTime,
+      endTime: createDoctorDto.endTime,
       slotDurationMins: createDoctorDto.slotDurationMins || 15,
       maxSlotsOverride: createDoctorDto.maxSlotsOverride,
       schedulingType: createDoctorDto.schedulingType,
-      emergencySlotsPerSession: createDoctorDto.emergencySlotsPerSession || 0,
       isActive: createDoctorDto.isActive ?? true,
     });
     return this.doctorsRepository.save(doctor);
@@ -49,7 +50,7 @@ export class DoctorsService {
     }
     if (!doctor.isActive) {
       throw new BadRequestException(
-        `Doctor "${doctor.name}" is currently not active. Please choose another doctor.`,
+        `Doctor "${doctor.name}" is currently not active.`,
       );
     }
     return doctor;
@@ -60,39 +61,39 @@ export class DoctorsService {
     availabilityDtos: SetAvailabilityDto[],
   ): Promise<Doctor> {
     const doctor = await this.getDoctorById(doctorId);
+
+    // Delete existing availability
     await this.availabilityRepository.delete({ doctor: { id: doctorId } });
+
+    // Create new availability records
     const availabilities = availabilityDtos.map((dto) =>
       this.availabilityRepository.create({
         doctor: doctor,
         dayOfWeek: dto.dayOfWeek,
-        startTime: dto.startTime,
-        endTime: dto.endTime,
         isWorkingDay: dto.isWorkingDay ?? true,
       }),
     );
+
     await this.availabilityRepository.save(availabilities);
     return this.getDoctorById(doctorId);
   }
 
   async getDoctorSlots(doctorId: string) {
     const doctor = await this.getDoctorById(doctorId);
-    if (!doctor.availability || doctor.availability.length === 0) {
+
+    if (!doctor.startTime || !doctor.endTime) {
       throw new BadRequestException(
-        'Doctor has no availability configured yet',
+        'Doctor working hours not configured.',
       );
     }
-    const workingDay = doctor.availability.find((a) => a.isWorkingDay);
-    if (!workingDay) {
-      throw new BadRequestException('Doctor has no working days configured');
-    }
-    const [startHour, startMin] = workingDay.startTime.split(':').map(Number);
-    const [endHour, endMin] = workingDay.endTime.split(':').map(Number);
-    const totalMinutes = endHour * 60 + endMin - (startHour * 60 + startMin);
+
+    const [sh, sm] = doctor.startTime.split(':').map(Number);
+    const [eh, em] = doctor.endTime.split(':').map(Number);
+    const totalMinutes = eh * 60 + em - (sh * 60 + sm);
     const autoCalculatedSlots = Math.floor(
       totalMinutes / doctor.slotDurationMins,
     );
     const totalSlots = doctor.maxSlotsOverride || autoCalculatedSlots;
-    const regularSlots = totalSlots - doctor.emergencySlotsPerSession;
 
     return {
       doctor: {
@@ -101,57 +102,56 @@ export class DoctorsService {
         specialization: doctor.specialization,
         schedulingType: doctor.schedulingType,
       },
+      workingHours: `${doctor.startTime} - ${doctor.endTime}`,
       slotDurationMins: doctor.slotDurationMins,
       autoCalculatedSlots,
-      totalSlotsPerSession: totalSlots,
-      regularSlots,
-      emergencySlots: doctor.emergencySlotsPerSession,
-      workingHours: `${workingDay.startTime} - ${workingDay.endTime}`,
+      totalSlotsPerDay: totalSlots,
     };
   }
+
   async getAvailableSlotsForDate(
-      doctorId: string,
-      date: string,
-    ): Promise<any> {
-      const doctor = await this.getDoctorById(doctorId);
+    doctorId: string,
+    date: string,
+  ): Promise<any> {
+    const doctor = await this.getDoctorById(doctorId);
 
-      const checkDate = new Date(date + 'T00:00:00');
-      const dayOfWeek = checkDate.getDay();
+    const checkDate = new Date(date + 'T00:00:00');
+    const dayOfWeek = checkDate.getDay();
 
-      const dayNames = [
-        'Sunday', 'Monday', 'Tuesday', 'Wednesday',
-        'Thursday', 'Friday', 'Saturday',
-      ];
+    const dayNames = [
+      'Sunday', 'Monday', 'Tuesday', 'Wednesday',
+      'Thursday', 'Friday', 'Saturday',
+    ];
 
-  // Check if doctor works on this day
-      const availability = doctor.availability.find(
-        (a) => a.dayOfWeek === dayOfWeek,
-      );
+    const availability = doctor.availability.find(
+      (a) => a.dayOfWeek === dayOfWeek,
+    );
 
-      if (!availability || !availability.isWorkingDay) {
-        return {
-          doctorName: doctor.name,
-          date,
-          dayName: dayNames[dayOfWeek],
-          isDoctorAvailable: false,
-          message: `Dr. ${doctor.name} is not available on ${dayNames[dayOfWeek]}`,
-          availableSlots: [],
-        };
-      }
+    if (!availability || !availability.isWorkingDay) {
+      return {
+        doctorName: doctor.name,
+        date,
+        dayName: dayNames[dayOfWeek],
+        isDoctorAvailable: false,
+        message: `Dr. ${doctor.name} is not available on ${dayNames[dayOfWeek]}`,
+        availableSlots: [],
+      };
+    }
 
-  // Calculate total slots
-      const [sh, sm] = availability.startTime.split(':').map(Number);
-      const [eh, em] = availability.endTime.split(':').map(Number);
-      const totalMins = eh * 60 + em - (sh * 60 + sm);
-      const totalSlots = doctor.maxSlotsOverride
+    const [sh, sm] = doctor.startTime.split(':').map(Number);
+    const [eh, em] = doctor.endTime.split(':').map(Number);
+    const totalMins = eh * 60 + em - (sh * 60 + sm);
+    const totalSlots = doctor.maxSlotsOverride
       ? doctor.maxSlotsOverride
       : Math.floor(totalMins / doctor.slotDurationMins);
 
-    const regularSlots = totalSlots - doctor.emergencySlotsPerSession;
+    const allSlots: {
+      tokenNumber: number;
+      slotTime: string;
+      status: string;
+    }[] = [];
 
-  // Generate all slot times
-    const allSlots: { tokenNumber: number; slotTime: string; status: string }[] = [];
-    for (let i = 0; i < regularSlots; i++) {
+    for (let i = 0; i < totalSlots; i++) {
       const slotMins = sh * 60 + sm + i * doctor.slotDurationMins;
       const slotHour = Math.floor(slotMins / 60);
       const slotMin = slotMins % 60;
@@ -170,10 +170,9 @@ export class DoctorsService {
       date,
       dayName: dayNames[dayOfWeek],
       isDoctorAvailable: true,
-      workingHours: `${availability.startTime} - ${availability.endTime}`,
+      workingHours: `${doctor.startTime} - ${doctor.endTime}`,
       slotDurationMins: doctor.slotDurationMins,
-      totalRegularSlots: regularSlots,
-      emergencySlots: doctor.emergencySlotsPerSession,
+      totalSlots,
       availableSlots: allSlots,
     };
   }

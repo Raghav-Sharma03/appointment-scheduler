@@ -18,15 +18,9 @@ export class DoctorAvailability {
   @JoinColumn({ name: 'doctor_id' })
   doctor: Doctor;
 
+  // 0 = Sunday, 1 = Monday ... 6 = Saturday
   @Column({ name: 'day_of_week', type: 'int' })
   dayOfWeek: number;
-  // 0 = Sunday, 1 = Monday, 2 = Tuesday ... 6 = Saturday
-
-  @Column({ name: 'start_time', type: 'time' })
-  startTime: string;
-
-  @Column({ name: 'end_time', type: 'time' })
-  endTime: string;
 
   @Column({ name: 'is_working_day', default: true })
   isWorkingDay: boolean;
