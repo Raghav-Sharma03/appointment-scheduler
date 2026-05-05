@@ -19,15 +19,14 @@ import { Appointment } from './appointments/appointment.entity';
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
         type: 'postgres',
-        host: configService.get<string>('DB_HOST'),
-        port: configService.get<number>('DB_PORT'),
-        username: configService.get<string>('DB_USERNAME'),
-        password: configService.get<string>('DB_PASSWORD'),
-        database: configService.get<string>('DB_NAME'),
+        url: configService.get<string>('DATABASE_URL'),
+        ssl: configService.get<string>('NODE_ENV') === 'production'
+          ? { rejectUnauthorized: false }
+          : false,
         entities: [User, Doctor, DoctorAvailability, Appointment],
-        synchronize: true,
+        synchronize: configService.get<string>('NODE_ENV') !== 'production',
         logging: true,
-      }),
+    }),
       inject: [ConfigService],
     }),
     AuthModule,
