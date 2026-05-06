@@ -20,9 +20,7 @@ import { Appointment } from './appointments/appointment.entity';
       useFactory: (configService: ConfigService) => ({
         type: 'postgres',
         url: configService.get<string>('DATABASE_URL'),
-        ssl: configService.get<string>('NODE_ENV') === 'production'
-          ? { rejectUnauthorized: false }
-          : false,
+        ssl: { rejectUnauthorized: false },
         entities: [User, Doctor, DoctorAvailability, Appointment],
         synchronize: configService.get<string>('NODE_ENV') !== 'production',
         logging: true,
