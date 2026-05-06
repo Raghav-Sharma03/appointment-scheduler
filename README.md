@@ -165,3 +165,20 @@ In production this should be replaced with migrations.
 - [x] Day 3: Appointment booking + All 5 scenarios
 - [x] Day 4: Wave scheduling + Emergency slots + Preferred booking
 - [x] Day 5: Documentation + Final polish
+Doctor-Patient Appointment Scheduling System built with NestJS
+
+## Tech Stack
+- NestJS + TypeScript
+- PostgreSQL + TypeORM
+- JWT Authentication
+
+## Modules
+- Auth (Register, Login, JWT)
+- Doctors
+- Appointments
+
+## Setup
+```bash
+npm install
+npm run start:dev
+```
