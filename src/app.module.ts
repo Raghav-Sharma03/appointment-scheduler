@@ -22,7 +22,7 @@ import { Appointment } from './appointments/appointment.entity';
         url: configService.get<string>('DATABASE_URL'),
         ssl: { rejectUnauthorized: false },
         entities: [User, Doctor, DoctorAvailability, Appointment],
-        synchronize: configService.get<string>('NODE_ENV') !== 'production',
+        synchronize: true,
         logging: true,
     }),
       inject: [ConfigService],
