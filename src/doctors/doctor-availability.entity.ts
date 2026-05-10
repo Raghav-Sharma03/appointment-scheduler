@@ -43,11 +43,11 @@ export class DoctorAvailability {
   })
   schedulingType: SessionSchedulingType;
 
-  @Column({ name: 'start_time', type: 'time' })
-  startTime: string;
+@Column({ name: 'start_time', type: 'time', nullable: true })
+startTime: string | null;
 
-  @Column({ name: 'end_time', type: 'time' })
-  endTime: string;
+@Column({ name: 'end_time', type: 'time', nullable: true })
+endTime: string | null;
 
   @Column({ name: 'duration_mins', type: 'int', default: 15 })
   durationMins: number;
