@@ -244,8 +244,8 @@ export class DoctorsService {
   // HELPER — Generate slots from a session
   // ─────────────────────────────────────────────────────────
   generateSlots(session: DoctorAvailability, label: string) {
-    const [sh, sm] = session.startTime.split(':').map(Number);
-    const [eh, em] = session.endTime.split(':').map(Number);
+    const [sh, sm] = (session.startTime ?? '00:00').split(':').map(Number);
+    const [eh, em] = (session.endTime ?? '00:00').split(':').map(Number);
     const totalMins = eh * 60 + em - (sh * 60 + sm);
     const totalSlots = Math.min(
       session.maxPatients,
