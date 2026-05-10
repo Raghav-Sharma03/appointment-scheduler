@@ -8,7 +8,7 @@ import { Repository } from 'typeorm';
 import { Appointment, AppointmentStatus } from './appointment.entity';
 import { DoctorsService } from '../doctors/doctors.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
-import { SchedulingType } from '../doctors/doctor.entity';
+import { AvailabilityType } from '../doctors/doctor-availability.entity';
 
 @Injectable()
 export class AppointmentsService {
@@ -27,12 +27,6 @@ export class AppointmentsService {
     if (!doctor.availability || doctor.availability.length === 0) {
       throw new BadRequestException(
         'This doctor has no availability configured.',
-      );
-    }
-
-    if (!doctor.startTime || !doctor.endTime) {
-      throw new BadRequestException(
-        'Doctor working hours not configured.',
       );
     }
 
@@ -57,18 +51,7 @@ export class AppointmentsService {
     }
 
     // Auto booking — find next available slot
-    let result: any;
-    switch (doctor.schedulingType) {
-      case SchedulingType.WAVE:
-        result = await this.findNextWaveSlot(doctor, 7);
-        break;
-      case SchedulingType.MODIFIED_WAVE:
-        result = await this.findNextModifiedWaveSlot(doctor, 7);
-        break;
-      default:
-        result = await this.findNextStreamSlot(doctor, 7);
-        break;
-    }
+    const result = await this.findNextAvailableSlot(doctor, 7);
 
     if (!result) {
       throw new BadRequestException(
@@ -91,12 +74,13 @@ export class AppointmentsService {
 
     return {
       success: true,
-      message: this.buildMessage(result, doctor.schedulingType),
+      message: this.buildMessage(result),
       appointment: {
         id: saved.id,
         doctorName: doctor.name,
         specialization: doctor.specialization,
-        schedulingType: doctor.schedulingType,
+        schedulingType: result.schedulingType,
+        sessionType: result.sessionType,
         patientPhone: saved.patientPhone,
         patientName: saved.patientName,
         appointmentDate: saved.appointmentDate,
@@ -110,6 +94,130 @@ export class AppointmentsService {
   }
 
   // ─────────────────────────────────────────────────────────
+  // FIND NEXT AVAILABLE SLOT (handles both recurring + non-recurring)
+  // ─────────────────────────────────────────────────────────
+  private async findNextAvailableSlot(doctor: any, maxDays: number) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    for (let i = 0; i < maxDays; i++) {
+      const checkDate = new Date(today);
+      checkDate.setDate(today.getDate() + i);
+      const dayOfWeek = checkDate.getDay();
+      const dateString = this.formatLocalDate(checkDate);
+
+      // Get all sessions available on this date
+      const sessions = this.getSessionsForDate(
+        doctor.availability,
+        dayOfWeek,
+        dateString,
+      );
+
+      if (sessions.length === 0) continue;
+
+      // Check each session for available slots
+      for (const session of sessions) {
+        const totalSlots = this.calcSessionSlots(session);
+
+        const bookedCount = await this.appointmentsRepository.count({
+          where: {
+            doctor: { id: doctor.id },
+            appointmentDate: dateString,
+            slotTime: this.getSessionSlotRange(session),
+            status: AppointmentStatus.BOOKED,
+          },
+        });
+
+        // Count booked appointments within this session's time range
+        const sessionBookedCount = await this.countBookedInSession(
+          doctor.id,
+          dateString,
+          session,
+        );
+
+        if (sessionBookedCount < totalSlots) {
+          const tokenNumber = sessionBookedCount + 1;
+          const slotTime = this.calcSlotTime(
+            session.startTime,
+            tokenNumber,
+            session.durationMins,
+          );
+          const scenario = this.detectScenario(i, today);
+          return {
+            date: dateString,
+            slotTime,
+            tokenNumber,
+            scenario,
+            daysAhead: i,
+            schedulingType: session.schedulingType,
+            sessionType: session.type,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // GET SESSIONS FOR A SPECIFIC DATE
+  // ─────────────────────────────────────────────────────────
+  private getSessionsForDate(
+    availability: any[],
+    dayOfWeek: number,
+    date: string,
+  ) {
+    const sessions: any[] = [];
+
+    // Recurring sessions for this day
+    const recurring = availability.filter(
+      (a) =>
+        a.type === AvailabilityType.RECURRING &&
+        a.dayOfWeek === dayOfWeek &&
+        a.isActive,
+    );
+    sessions.push(...recurring);
+
+    // Non-recurring sessions for this specific date (adds on top)
+    const nonRecurring = availability.filter(
+      (a) =>
+        a.type === AvailabilityType.NON_RECURRING &&
+        a.specificDate === date &&
+        a.isActive,
+    );
+    sessions.push(...nonRecurring);
+
+    return sessions;
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // COUNT BOOKED APPOINTMENTS WITHIN A SESSION TIME RANGE
+  // ─────────────────────────────────────────────────────────
+  private async countBookedInSession(
+    doctorId: string,
+    date: string,
+    session: any,
+  ): Promise<number> {
+    const allBooked = await this.appointmentsRepository.find({
+      where: {
+        doctor: { id: doctorId },
+        appointmentDate: date,
+        status: AppointmentStatus.BOOKED,
+      },
+    });
+
+    const [sh, sm] = session.startTime.split(':').map(Number);
+    const [eh, em] = session.endTime.split(':').map(Number);
+    const sessionStart = sh * 60 + sm;
+    const sessionEnd = eh * 60 + em;
+
+    return allBooked.filter((apt) => {
+      const [ah, am] = apt.slotTime.split(':').map(Number);
+      const aptMins = ah * 60 + am;
+      return aptMins >= sessionStart && aptMins < sessionEnd;
+    }).length;
+  }
+
+  // ─────────────────────────────────────────────────────────
   // BOOK WITH PATIENT PREFERENCE
   // ─────────────────────────────────────────────────────────
   private async bookWithPreference(dto: CreateAppointmentDto, doctor: any) {
@@ -119,78 +227,84 @@ export class AppointmentsService {
     const checkDate = new Date(preferredDate + 'T00:00:00');
     const dayOfWeek = checkDate.getDay();
 
-    // Check if doctor works on preferred date
-    const availability = doctor.availability.find(
-      (a: any) => a.dayOfWeek === dayOfWeek && a.isWorkingDay === true,
+    const sessions = this.getSessionsForDate(
+      doctor.availability,
+      dayOfWeek,
+      preferredDate,
     );
 
-    if (!availability) {
-      const nextSlot = await this.findNextStreamSlot(doctor, 7);
+    if (sessions.length === 0) {
+      const nextSlot = await this.findNextAvailableSlot(doctor, 7);
       if (!nextSlot) {
         throw new BadRequestException(
           `Doctor is not available on ${preferredDate}. No slots found in next 7 days.`,
         );
       }
       return this.buildNotAvailableResponse(
-        dto, doctor, preferredDate,
+        dto,
+        doctor,
+        preferredDate,
         `Doctor does not work on this day`,
         nextSlot,
       );
     }
 
-    // Check if preferred time is within working hours
-    const [sh, sm] = doctor.startTime.split(':').map(Number);
-    const [eh, em] = doctor.endTime.split(':').map(Number);
     const [ph, pm] = preferredTime.split(':').map(Number);
-
-    const startMins = sh * 60 + sm;
-    const endMins = eh * 60 + em;
     const preferredMins = ph * 60 + pm;
 
-    if (preferredMins < startMins || preferredMins >= endMins) {
-      const nextSlot = await this.findNextStreamSlot(doctor, 7);
-      if (!nextSlot) {
-        throw new BadRequestException(
-          `Preferred time is outside working hours.`,
-        );
-      }
+    // Find which session the preferred time falls into
+    const matchingSession = sessions.find((s) => {
+      const [sh, sm] = s.startTime.split(':').map(Number);
+      const [eh, em] = s.endTime.split(':').map(Number);
+      return preferredMins >= sh * 60 + sm && preferredMins < eh * 60 + em;
+    });
+
+    if (!matchingSession) {
+      const nextSlot = await this.findNextAvailableSlot(doctor, 7);
       return this.buildNotAvailableResponse(
-        dto, doctor, preferredDate,
-        `Preferred time ${preferredTime} is outside working hours ${doctor.startTime} - ${doctor.endTime}`,
+        dto,
+        doctor,
+        preferredDate,
+        `Preferred time ${preferredTime} is outside all working sessions`,
         nextSlot,
       );
     }
 
-    // Calculate token number from preferred time
-    const totalSlots = this.calcTotalSlots(doctor);
+    const [sh, sm] = matchingSession.startTime.split(':').map(Number);
+    const startMins = sh * 60 + sm;
     const slotIndex = Math.floor(
-      (preferredMins - startMins) / doctor.slotDurationMins,
+      (preferredMins - startMins) / matchingSession.durationMins,
     );
     const tokenNumber = slotIndex + 1;
+    const totalSlots = this.calcSessionSlots(matchingSession);
 
     if (tokenNumber > totalSlots) {
-      const nextSlot = await this.findNextStreamSlot(doctor, 7);
+      const nextSlot = await this.findNextAvailableSlot(doctor, 7);
       return this.buildNotAvailableResponse(
-        dto, doctor, preferredDate,
+        dto,
+        doctor,
+        preferredDate,
         `No slot available at ${preferredTime}`,
         nextSlot,
       );
     }
 
-    // Check if this token is already booked
+    // Check if this slot is already booked
     const existingAtSlot = await this.appointmentsRepository.findOne({
       where: {
         doctor: { id: doctor.id },
         appointmentDate: preferredDate,
-        tokenNumber: tokenNumber,
+        slotTime: preferredTime,
         status: AppointmentStatus.BOOKED,
       },
     });
 
     if (existingAtSlot) {
-      const nextSlot = await this.findNextStreamSlot(doctor, 7);
+      const nextSlot = await this.findNextAvailableSlot(doctor, 7);
       return this.buildNotAvailableResponse(
-        dto, doctor, preferredDate,
+        dto,
+        doctor,
+        preferredDate,
         `Slot at ${preferredTime} on ${preferredDate} is already booked`,
         nextSlot,
       );
@@ -204,7 +318,7 @@ export class AppointmentsService {
       reason: dto.reason,
       appointmentDate: preferredDate,
       slotTime: preferredTime,
-      tokenNumber: tokenNumber,
+      tokenNumber,
       status: AppointmentStatus.BOOKED,
     });
 
@@ -217,6 +331,8 @@ export class AppointmentsService {
         id: saved.id,
         doctorName: doctor.name,
         specialization: doctor.specialization,
+        schedulingType: matchingSession.schedulingType,
+        sessionType: matchingSession.type,
         patientPhone: saved.patientPhone,
         patientName: saved.patientName,
         appointmentDate: saved.appointmentDate,
@@ -227,197 +343,6 @@ export class AppointmentsService {
       },
       bookedOnPreference: true,
     };
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // HELPER — Not available response
-  // ─────────────────────────────────────────────────────────
-  private async buildNotAvailableResponse(
-    dto: CreateAppointmentDto,
-    doctor: any,
-    preferredDate: string,
-    reason: string,
-    nextSlot: any,
-  ) {
-    const nextDateSlots = await this.getAvailableSlotsForDate(
-      doctor.id,
-      nextSlot.date,
-    );
-
-    return {
-      success: false,
-      preferredSlotAvailable: false,
-      reason: reason,
-      preferredDate: preferredDate,
-      preferredTime: dto.preferredTime,
-      message: `Your preferred slot is not available. Next available appointment is on ${nextSlot.date} at ${nextSlot.slotTime}`,
-      nextAvailableSlot: {
-        date: nextSlot.date,
-        reportingTime: nextSlot.slotTime,
-        tokenNumber: nextSlot.tokenNumber,
-      },
-      availableSlotsOnNextDate: nextDateSlots.slots?.filter(
-        (s: any) => s.status === 'available',
-      ),
-      hint: 'Please book again with one of the above available slots.',
-    };
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // STREAM SCHEDULING
-  // ─────────────────────────────────────────────────────────
-  private async findNextStreamSlot(doctor: any, maxDays: number) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    for (let i = 0; i < maxDays; i++) {
-      const checkDate = new Date(today);
-      checkDate.setDate(today.getDate() + i);
-      const dayOfWeek = checkDate.getDay();
-      const dateString = this.formatLocalDate(checkDate);
-
-      const availability = doctor.availability.find(
-        (a: any) => a.dayOfWeek === dayOfWeek && a.isWorkingDay === true,
-      );
-
-      if (!availability) continue;
-
-      const totalSlots = this.calcTotalSlots(doctor);
-
-      const activeCount = await this.appointmentsRepository.count({
-        where: {
-          doctor: { id: doctor.id },
-          appointmentDate: dateString,
-          status: AppointmentStatus.BOOKED,
-        },
-      });
-
-      if (activeCount < totalSlots) {
-        const tokenNumber = activeCount + 1;
-        const slotTime = this.calcSlotTime(
-          doctor.startTime,
-          tokenNumber,
-          doctor.slotDurationMins,
-        );
-        const scenario = this.detectScenario(i, doctor, today);
-        return {
-          date: dateString,
-          slotTime,
-          tokenNumber,
-          scenario,
-          daysAhead: i,
-        };
-      }
-    }
-    return null;
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // WAVE SCHEDULING
-  // ─────────────────────────────────────────────────────────
-  private async findNextWaveSlot(doctor: any, maxDays: number) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    for (let i = 0; i < maxDays; i++) {
-      const checkDate = new Date(today);
-      checkDate.setDate(today.getDate() + i);
-      const dayOfWeek = checkDate.getDay();
-      const dateString = this.formatLocalDate(checkDate);
-
-      const availability = doctor.availability.find(
-        (a: any) => a.dayOfWeek === dayOfWeek && a.isWorkingDay === true,
-      );
-
-      if (!availability) continue;
-
-      const totalSlots = this.calcTotalSlots(doctor);
-      const patientsPerWave = 3;
-
-      const activeCount = await this.appointmentsRepository.count({
-        where: {
-          doctor: { id: doctor.id },
-          appointmentDate: dateString,
-          status: AppointmentStatus.BOOKED,
-        },
-      });
-
-      if (activeCount < totalSlots) {
-        const tokenNumber = activeCount + 1;
-        const waveNumber = Math.floor(activeCount / patientsPerWave);
-        const [startHour, startMin] = doctor.startTime.split(':').map(Number);
-        const waveMinutes = startHour * 60 + startMin + waveNumber * 30;
-        const waveHour = Math.floor(waveMinutes / 60);
-        const waveMin = waveMinutes % 60;
-        const slotTime = `${String(waveHour).padStart(2, '0')}:${String(waveMin).padStart(2, '0')}`;
-        const positionInWave = (activeCount % patientsPerWave) + 1;
-        const scenario = this.detectScenario(i, doctor, today);
-        return {
-          date: dateString,
-          slotTime,
-          tokenNumber,
-          scenario,
-          daysAhead: i,
-          waveInfo: `Wave ${waveNumber + 1}, Position ${positionInWave} of ${patientsPerWave}`,
-        };
-      }
-    }
-    return null;
-  }
-
-  // ─────────────────────────────────────────────────────────
-  // MODIFIED WAVE SCHEDULING
-  // ─────────────────────────────────────────────────────────
-  private async findNextModifiedWaveSlot(doctor: any, maxDays: number) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    for (let i = 0; i < maxDays; i++) {
-      const checkDate = new Date(today);
-      checkDate.setDate(today.getDate() + i);
-      const dayOfWeek = checkDate.getDay();
-      const dateString = this.formatLocalDate(checkDate);
-
-      const availability = doctor.availability.find(
-        (a: any) => a.dayOfWeek === dayOfWeek && a.isWorkingDay === true,
-      );
-
-      if (!availability) continue;
-
-      const totalSlots = this.calcTotalSlots(doctor);
-
-      const activeCount = await this.appointmentsRepository.count({
-        where: {
-          doctor: { id: doctor.id },
-          appointmentDate: dateString,
-          status: AppointmentStatus.BOOKED,
-        },
-      });
-
-      if (activeCount < totalSlots) {
-        const tokenNumber = activeCount + 1;
-        const [startHour, startMin] = doctor.startTime.split(':').map(Number);
-        const positionInCycle = activeCount % 3;
-        const cycleNumber = Math.floor(activeCount / 3);
-        const baseMinutes = startHour * 60 + startMin + cycleNumber * 60;
-        const slotMinutes = positionInCycle < 2
-          ? baseMinutes
-          : baseMinutes + 30;
-        const slotHour = Math.floor(slotMinutes / 60);
-        const slotMin = slotMinutes % 60;
-        const slotTime = `${String(slotHour).padStart(2, '0')}:${String(slotMin).padStart(2, '0')}`;
-        const scenario = this.detectScenario(i, doctor, today);
-        return {
-          date: dateString,
-          slotTime,
-          tokenNumber,
-          scenario,
-          daysAhead: i,
-          cycleInfo: `Hour ${cycleNumber + 1}, Slot ${positionInCycle + 1} of 3`,
-        };
-      }
-    }
-    return null;
   }
 
   // ─────────────────────────────────────────────────────────
@@ -451,7 +376,8 @@ export class AppointmentsService {
 
     return {
       success: true,
-      message: 'Appointment cancelled successfully. The slot is now available for other patients.',
+      message:
+        'Appointment cancelled successfully. The slot is now available for other patients.',
       freedSlot: {
         date: appointment.appointmentDate,
         time: appointment.slotTime,
@@ -470,18 +396,7 @@ export class AppointmentsService {
       throw new BadRequestException('Doctor has no availability configured.');
     }
 
-    let result: any;
-    switch (doctor.schedulingType) {
-      case SchedulingType.WAVE:
-        result = await this.findNextWaveSlot(doctor, 7);
-        break;
-      case SchedulingType.MODIFIED_WAVE:
-        result = await this.findNextModifiedWaveSlot(doctor, 7);
-        break;
-      default:
-        result = await this.findNextStreamSlot(doctor, 7);
-        break;
-    }
+    const result = await this.findNextAvailableSlot(doctor, 7);
 
     if (!result) {
       return {
@@ -502,7 +417,8 @@ export class AppointmentsService {
       reportingTime: result.slotTime,
       tokenNumber: result.tokenNumber,
       daysFromToday: result.daysAhead,
-      schedulingType: doctor.schedulingType,
+      schedulingType: result.schedulingType,
+      sessionType: result.sessionType,
       scenario: result.scenario,
     };
   }
@@ -554,11 +470,13 @@ export class AppointmentsService {
     const checkDate = new Date(date + 'T00:00:00');
     const dayOfWeek = checkDate.getDay();
 
-    const availability = doctor.availability.find(
-      (a: any) => a.dayOfWeek === dayOfWeek,
+    const sessions = this.getSessionsForDate(
+      doctor.availability,
+      dayOfWeek,
+      date,
     );
 
-    if (!availability || !availability.isWorkingDay) {
+    if (sessions.length === 0) {
       return {
         date,
         isDoctorWorking: false,
@@ -566,7 +484,10 @@ export class AppointmentsService {
       };
     }
 
-    const totalSlots = this.calcTotalSlots(doctor);
+    const totalSlots = sessions.reduce(
+      (sum, s) => sum + this.calcSessionSlots(s),
+      0,
+    );
 
     const activeCount = await this.appointmentsRepository.count({
       where: {
@@ -588,14 +509,19 @@ export class AppointmentsService {
       date,
       dayName: checkDate.toLocaleDateString('en-IN', { weekday: 'long' }),
       isDoctorWorking: true,
-      workingHours: `${doctor.startTime} - ${doctor.endTime}`,
-      schedulingType: doctor.schedulingType,
-      slotDurationMins: doctor.slotDurationMins,
       totalSlots,
       bookedSlots: activeCount,
       cancelledSlots: cancelledCount,
       availableSlots: totalSlots - activeCount,
       isFull: activeCount >= totalSlots,
+      sessions: sessions.map((s) => ({
+        type: s.type,
+        schedulingType: s.schedulingType,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        durationMins: s.durationMins,
+        maxPatients: s.maxPatients,
+      })),
     };
   }
 
@@ -604,7 +530,6 @@ export class AppointmentsService {
   // ─────────────────────────────────────────────────────────
   async getAvailableSlotsForDate(doctorId: string, date: string) {
     const doctor = await this.doctorsService.getDoctorById(doctorId);
-
     const checkDate = new Date(date + 'T00:00:00');
     const dayOfWeek = checkDate.getDay();
     const dayNames = [
@@ -612,11 +537,13 @@ export class AppointmentsService {
       'Thursday', 'Friday', 'Saturday',
     ];
 
-    const availability = doctor.availability.find(
-      (a: any) => a.dayOfWeek === dayOfWeek,
+    const sessions = this.getSessionsForDate(
+      doctor.availability,
+      dayOfWeek,
+      date,
     );
 
-    if (!availability || !availability.isWorkingDay) {
+    if (sessions.length === 0) {
       return {
         doctorName: doctor.name,
         date,
@@ -627,13 +554,6 @@ export class AppointmentsService {
       };
     }
 
-    const [sh, sm] = doctor.startTime.split(':').map(Number);
-    const [eh, em] = doctor.endTime.split(':').map(Number);
-    const totalMins = eh * 60 + em - (sh * 60 + sm);
-    const totalSlots = doctor.maxSlotsOverride
-      ? doctor.maxSlotsOverride
-      : Math.floor(totalMins / doctor.slotDurationMins);
-
     const bookedAppointments = await this.appointmentsRepository.find({
       where: {
         doctor: { id: doctorId },
@@ -642,50 +562,42 @@ export class AppointmentsService {
       },
     });
 
-    const slots: {
-      tokenNumber: number;
-      slotTime: string;
-      status: string;
-      patientName?: string;
-    }[] = [];
+    const allSlots: any[] = [];
 
-    for (let i = 0; i < totalSlots; i++) {
-      const slotMins = sh * 60 + sm + i * doctor.slotDurationMins;
-      const slotHour = Math.floor(slotMins / 60);
-      const slotMin = slotMins % 60;
-      const slotTime = `${String(slotHour).padStart(2, '0')}:${String(slotMin).padStart(2, '0')}`;
-
-      const bookedAppointment = bookedAppointments.find(
-        (apt) => apt.tokenNumber === i + 1,
+    for (const session of sessions) {
+      const slots = this.doctorsService.generateSlots(
+        session,
+        session.type,
       );
 
-      slots.push({
-        tokenNumber: i + 1,
-        slotTime,
-        status: bookedAppointment ? 'booked' : 'available',
-        ...(bookedAppointment && {
-          patientName: bookedAppointment.patientName || 'Patient',
-        }),
-      });
+const slotsWithStatus = slots.map((slot: any) => {
+  const isBooked = bookedAppointments.some(
+    (apt) => apt.slotTime === slot.slotTime,
+  );
+  return {
+    ...slot,
+    status: isBooked ? 'booked' : 'available',
+  };
+});
+
+      allSlots.push(...slotsWithStatus);
     }
 
-    const availableCount = slots.filter((s) => s.status === 'available').length;
-    const bookedCount = slots.filter((s) => s.status === 'booked').length;
+    const availableCount = allSlots.filter(
+      (s) => s.status === 'available',
+    ).length;
 
     return {
       doctorName: doctor.name,
       specialization: doctor.specialization,
-      schedulingType: doctor.schedulingType,
       date,
       dayName: dayNames[dayOfWeek],
       isDoctorAvailable: true,
-      workingHours: `${doctor.startTime} - ${doctor.endTime}`,
-      slotDurationMins: doctor.slotDurationMins,
-      totalSlots,
+      totalSlots: allSlots.length,
       availableSlotsCount: availableCount,
-      bookedSlotsCount: bookedCount,
+      bookedSlotsCount: allSlots.length - availableCount,
       isFull: availableCount === 0,
-      slots,
+      slots: allSlots,
     };
   }
 
@@ -699,41 +611,37 @@ export class AppointmentsService {
     return `${year}-${month}-${day}`;
   }
 
-  private calcTotalSlots(doctor: any): number {
-    if (doctor.maxSlotsOverride) return doctor.maxSlotsOverride;
-    const [sh, sm] = doctor.startTime.split(':').map(Number);
-    const [eh, em] = doctor.endTime.split(':').map(Number);
-    const total = eh * 60 + em - (sh * 60 + sm);
-    return Math.floor(total / doctor.slotDurationMins);
+  private calcSessionSlots(session: any): number {
+    const [sh, sm] = session.startTime.split(':').map(Number);
+    const [eh, em] = session.endTime.split(':').map(Number);
+    const totalMins = eh * 60 + em - (sh * 60 + sm);
+    return Math.min(
+      session.maxPatients,
+      Math.floor(totalMins / session.durationMins),
+    );
   }
 
   private calcSlotTime(
     startTime: string,
     tokenNumber: number,
-    slotDurationMins: number,
+    durationMins: number,
   ): string {
     const [sh, sm] = startTime.split(':').map(Number);
-    const totalMins = sh * 60 + sm + (tokenNumber - 1) * slotDurationMins;
+    const totalMins = sh * 60 + sm + (tokenNumber - 1) * durationMins;
     return `${String(Math.floor(totalMins / 60)).padStart(2, '0')}:${String(totalMins % 60).padStart(2, '0')}`;
   }
 
-  private detectScenario(daysAhead: number, doctor: any, today: Date): string {
-    if (daysAhead === 0) return 'Scenario 1: Booked today';
-    if (daysAhead === 1) return 'Scenario 2: Today full, booked tomorrow';
-    for (let j = 1; j < daysAhead; j++) {
-      const d = new Date(today);
-      d.setDate(today.getDate() + j);
-      const av = doctor.availability.find(
-        (a: any) => a.dayOfWeek === d.getDay(),
-      );
-      if (!av || !av.isWorkingDay) {
-        return `Scenario 4: Skipped non-working days, booked ${daysAhead} days ahead`;
-      }
-    }
-    return `Scenario 3: Today & intermediate days full, booked ${daysAhead} days ahead`;
+  private getSessionSlotRange(session: any): string {
+    return session.startTime;
   }
 
-  private buildMessage(result: any, schedulingType: string): string {
+  private detectScenario(daysAhead: number, today: Date): string {
+    if (daysAhead === 0) return 'Scenario 1: Booked today';
+    if (daysAhead === 1) return 'Scenario 2: Today full, booked tomorrow';
+    return `Scenario 3: Booked ${daysAhead} days ahead`;
+  }
+
+  private buildMessage(result: any): string {
     const dayName = new Date(
       result.date + 'T00:00:00',
     ).toLocaleDateString('en-IN', {
@@ -745,9 +653,27 @@ export class AppointmentsService {
     if (result.daysAhead === 0) {
       return `Appointment booked for today. Token #${result.tokenNumber}, Reporting time: ${result.slotTime}`;
     }
-    if (schedulingType === SchedulingType.WAVE && result.waveInfo) {
-      return `No slots today. Wave appointment booked on ${dayName}. ${result.waveInfo}. Reporting time: ${result.slotTime}`;
-    }
     return `No slots available today. Next appointment on ${dayName}. Token #${result.tokenNumber}, Reporting time: ${result.slotTime}`;
   }
+  private async buildNotAvailableResponse(
+  dto: CreateAppointmentDto,
+  doctor: any,
+  preferredDate: string,
+  reason: string,
+  nextSlot: any,
+) {
+  return {
+    success: false,
+    preferredSlotAvailable: false,
+    reason,
+    preferredDate,
+    preferredTime: dto.preferredTime,
+    message: `Your preferred slot is not available. Next available appointment is on ${nextSlot.date} at ${nextSlot.slotTime}`,
+    nextAvailableSlot: {
+      date: nextSlot.date,
+      reportingTime: nextSlot.slotTime,
+      tokenNumber: nextSlot.tokenNumber,
+    },
+  };
+}
 }

@@ -6,9 +6,16 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Doctor } from './doctor.entity';
-import { DoctorAvailability } from './doctor-availability.entity';
+import {
+  DoctorAvailability,
+  AvailabilityType,
+  SessionSchedulingType,
+} from './doctor-availability.entity';
 import { CreateDoctorDto } from './dto/create-doctor.dto';
-import { SetAvailabilityDto } from './dto/set-availability.dto';
+import {
+  SetRecurringAvailabilityDto,
+  SetNonRecurringAvailabilityDto,
+} from './dto/set-availability.dto';
 
 @Injectable()
 export class DoctorsService {
@@ -56,21 +63,33 @@ export class DoctorsService {
     return doctor;
   }
 
-  async setAvailability(
+  // ─────────────────────────────────────────────────────────
+  // SET RECURRING AVAILABILITY
+  // ─────────────────────────────────────────────────────────
+  async setRecurringAvailability(
     doctorId: string,
-    availabilityDtos: SetAvailabilityDto[],
+    dtos: SetRecurringAvailabilityDto[],
   ): Promise<Doctor> {
     const doctor = await this.getDoctorById(doctorId);
 
-    // Delete existing availability
-    await this.availabilityRepository.delete({ doctor: { id: doctorId } });
+    // Delete existing recurring availability only
+    await this.availabilityRepository.delete({
+      doctor: { id: doctorId },
+      type: AvailabilityType.RECURRING,
+    });
 
-    // Create new availability records
-    const availabilities = availabilityDtos.map((dto) =>
+    const availabilities = dtos.map((dto) =>
       this.availabilityRepository.create({
-        doctor: doctor,
+        doctor,
+        type: AvailabilityType.RECURRING,
+        schedulingType: dto.schedulingType as unknown as SessionSchedulingType,
+        startTime: dto.startTime,
+        endTime: dto.endTime,
+        durationMins: dto.durationMins,
+        maxPatients: dto.maxPatients,
         dayOfWeek: dto.dayOfWeek,
-        isWorkingDay: dto.isWorkingDay ?? true,
+        specificDate: null,
+        isActive: dto.isActive ?? true,
       }),
     );
 
@@ -78,22 +97,53 @@ export class DoctorsService {
     return this.getDoctorById(doctorId);
   }
 
+  // ─────────────────────────────────────────────────────────
+  // SET NON-RECURRING AVAILABILITY (adds extra slots)
+  // ─────────────────────────────────────────────────────────
+  async setNonRecurringAvailability(
+    doctorId: string,
+    dtos: SetNonRecurringAvailabilityDto[],
+  ): Promise<Doctor> {
+    const doctor = await this.getDoctorById(doctorId);
+
+    // Non-recurring slots are ADDED on top — never delete existing ones
+    const availabilities = dtos.map((dto) =>
+      this.availabilityRepository.create({
+        doctor,
+        type: AvailabilityType.NON_RECURRING,
+        schedulingType: dto.schedulingType as unknown as SessionSchedulingType,
+        startTime: dto.startTime,
+        endTime: dto.endTime,
+        durationMins: dto.durationMins,
+        maxPatients: dto.maxPatients,
+        dayOfWeek: null,
+        specificDate: dto.specificDate,
+        isActive: dto.isActive ?? true,
+      }),
+    );
+
+    await this.availabilityRepository.save(availabilities);
+    return this.getDoctorById(doctorId);
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // GET DOCTOR SLOTS INFO
+  // ─────────────────────────────────────────────────────────
   async getDoctorSlots(doctorId: string) {
     const doctor = await this.getDoctorById(doctorId);
 
-    if (!doctor.startTime || !doctor.endTime) {
-      throw new BadRequestException(
-        'Doctor working hours not configured.',
-      );
-    }
-
-    const [sh, sm] = doctor.startTime.split(':').map(Number);
-    const [eh, em] = doctor.endTime.split(':').map(Number);
-    const totalMinutes = eh * 60 + em - (sh * 60 + sm);
-    const autoCalculatedSlots = Math.floor(
-      totalMinutes / doctor.slotDurationMins,
+    const recurringSlots = doctor.availability.filter(
+      (a) => a.type === AvailabilityType.RECURRING && a.isActive,
     );
-    const totalSlots = doctor.maxSlotsOverride || autoCalculatedSlots;
+
+    const nonRecurringSlots = doctor.availability.filter(
+      (a) => a.type === AvailabilityType.NON_RECURRING && a.isActive,
+    );
+
+    const dayNames = [
+      'Sunday', 'Monday', 'Tuesday',
+      'Wednesday', 'Thursday', 'Friday', 'Saturday',
+    ];
 
     return {
       doctor: {
@@ -102,78 +152,120 @@ export class DoctorsService {
         specialization: doctor.specialization,
         schedulingType: doctor.schedulingType,
       },
-      workingHours: `${doctor.startTime} - ${doctor.endTime}`,
-      slotDurationMins: doctor.slotDurationMins,
-      autoCalculatedSlots,
-      totalSlotsPerDay: totalSlots,
+      recurringsessions: recurringSlots.map((s) => ({
+        id: s.id,
+        schedulingType: s.schedulingType,
+        day: s.dayOfWeek !== null ? dayNames[s.dayOfWeek] : 'N/A',
+        startTime: s.startTime,
+        endTime: s.endTime,
+        durationMins: s.durationMins,
+        maxPatients: s.maxPatients,
+      })),
+      nonRecurringSessions: nonRecurringSlots.map((s) => ({
+        id: s.id,
+        schedulingType: s.schedulingType,
+        specificDate: s.specificDate,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        durationMins: s.durationMins,
+        maxPatients: s.maxPatients,
+      })),
     };
   }
 
+  // ─────────────────────────────────────────────────────────
+  // GET AVAILABLE SLOTS FOR DATE
+  // ─────────────────────────────────────────────────────────
   async getAvailableSlotsForDate(
     doctorId: string,
     date: string,
   ): Promise<any> {
     const doctor = await this.getDoctorById(doctorId);
-
     const checkDate = new Date(date + 'T00:00:00');
     const dayOfWeek = checkDate.getDay();
-
     const dayNames = [
       'Sunday', 'Monday', 'Tuesday', 'Wednesday',
       'Thursday', 'Friday', 'Saturday',
     ];
 
-    const availability = doctor.availability.find(
-      (a) => a.dayOfWeek === dayOfWeek,
+    // Find recurring session for this day
+    const recurringSession = doctor.availability.find(
+      (a) =>
+        a.type === AvailabilityType.RECURRING &&
+        a.dayOfWeek === dayOfWeek &&
+        a.isActive,
     );
 
-    if (!availability || !availability.isWorkingDay) {
+    // Find non-recurring sessions for this specific date
+    const nonRecurringSessions = doctor.availability.filter(
+      (a) =>
+        a.type === AvailabilityType.NON_RECURRING &&
+        a.specificDate === date &&
+        a.isActive,
+    );
+
+    if (!recurringSession && nonRecurringSessions.length === 0) {
       return {
         doctorName: doctor.name,
         date,
         dayName: dayNames[dayOfWeek],
         isDoctorAvailable: false,
         message: `Dr. ${doctor.name} is not available on ${dayNames[dayOfWeek]}`,
-        availableSlots: [],
+        slots: [],
       };
     }
 
-    const [sh, sm] = doctor.startTime.split(':').map(Number);
-    const [eh, em] = doctor.endTime.split(':').map(Number);
-    const totalMins = eh * 60 + em - (sh * 60 + sm);
-    const totalSlots = doctor.maxSlotsOverride
-      ? doctor.maxSlotsOverride
-      : Math.floor(totalMins / doctor.slotDurationMins);
+    const allSlots: any[] = [];
 
-    const allSlots: {
-      tokenNumber: number;
-      slotTime: string;
-      status: string;
-    }[] = [];
+    // Add recurring slots
+    if (recurringSession) {
+      const slots = this.generateSlots(recurringSession, 'recurring');
+      allSlots.push(...slots);
+    }
 
-    for (let i = 0; i < totalSlots; i++) {
-      const slotMins = sh * 60 + sm + i * doctor.slotDurationMins;
-      const slotHour = Math.floor(slotMins / 60);
-      const slotMin = slotMins % 60;
-      const slotTime = `${String(slotHour).padStart(2, '0')}:${String(slotMin).padStart(2, '0')}`;
-      allSlots.push({
-        tokenNumber: i + 1,
-        slotTime,
-        status: 'available',
-      });
+    // Add non-recurring slots on top
+    for (const session of nonRecurringSessions) {
+      const slots = this.generateSlots(session, 'non-recurring (extra)');
+      allSlots.push(...slots);
     }
 
     return {
       doctorName: doctor.name,
       specialization: doctor.specialization,
-      schedulingType: doctor.schedulingType,
       date,
       dayName: dayNames[dayOfWeek],
       isDoctorAvailable: true,
-      workingHours: `${doctor.startTime} - ${doctor.endTime}`,
-      slotDurationMins: doctor.slotDurationMins,
-      totalSlots,
-      availableSlots: allSlots,
+      totalSlots: allSlots.length,
+      slots: allSlots,
     };
+  }
+
+  // ─────────────────────────────────────────────────────────
+  // HELPER — Generate slots from a session
+  // ─────────────────────────────────────────────────────────
+  generateSlots(session: DoctorAvailability, label: string) {
+    const [sh, sm] = session.startTime.split(':').map(Number);
+    const [eh, em] = session.endTime.split(':').map(Number);
+    const totalMins = eh * 60 + em - (sh * 60 + sm);
+    const totalSlots = Math.min(
+      session.maxPatients,
+      Math.floor(totalMins / session.durationMins),
+    );
+
+    const slots: any[] = [];
+    for (let i = 0; i < totalSlots; i++) {
+      const slotMins = sh * 60 + sm + i * session.durationMins;
+      const slotHour = Math.floor(slotMins / 60);
+      const slotMin = slotMins % 60;
+      const slotTime = `${String(slotHour).padStart(2, '0')}:${String(slotMin).padStart(2, '0')}`;
+      slots.push({
+        tokenNumber: i + 1,
+        slotTime,
+        sessionType: label,
+        schedulingType: session.schedulingType,
+        durationMins: session.durationMins,
+      });
+    }
+    return slots;
   }
 }
